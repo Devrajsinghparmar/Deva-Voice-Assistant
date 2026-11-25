@@ -30,6 +30,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
+app.url_map.strict_slashes = False
 CORS(app)
 
 # Initialize core services
@@ -51,13 +52,20 @@ def start_background_wake_service():
 
 @app.route("/")
 @app.route("/index")
-@app.route("/api/index")
+@app.route("/api/index", methods=["GET", "POST", "OPTIONS"])
 def index():
-    """Serves the Deva Google Assistant web interface."""
+    """Serves web interface or routes POST payloads arriving directly at /api/index."""
+    if request.method == "OPTIONS":
+        return "", 200
+    if request.method == "POST":
+        if "audio" in request.files:
+            return process_audio()
+        return text_chat()
     return send_from_directory(STATIC_DIR, "index.html")
 
 
-@app.route("/api/status", methods=["GET"])
+@app.route("/api/status", methods=["GET", "OPTIONS"])
+@app.route("/status", methods=["GET", "OPTIONS"])
 def get_status():
     """Returns system status and current configuration."""
     api_key = os.getenv("GROQ_API_KEY", "").strip() or config.GROQ_API_KEY
@@ -78,9 +86,12 @@ def get_status():
     })
 
 
-@app.route("/api/knowledge", methods=["GET", "POST", "DELETE"])
+@app.route("/api/knowledge", methods=["GET", "POST", "DELETE", "OPTIONS"])
+@app.route("/knowledge", methods=["GET", "POST", "DELETE", "OPTIONS"])
 def handle_knowledge():
     """API Endpoint to view, add, or delete entries in knowledge_base.json."""
+    if request.method == "OPTIONS":
+        return "", 200
     if request.method == "GET":
         km.load_knowledge()
         return jsonify({"knowledge": km.knowledge, "status": "success"})
@@ -115,9 +126,12 @@ def handle_knowledge():
         return jsonify({"error": "Entry not found"}), 404
 
 
-@app.route("/api/process-audio", methods=["POST"])
+@app.route("/api/process-audio", methods=["POST", "OPTIONS"])
+@app.route("/process-audio", methods=["POST", "OPTIONS"])
 def process_audio():
     """Processes recorded audio blobs with JSON Knowledge Base detection and system actions."""
+    if request.method == "OPTIONS":
+        return "", 200
     if "audio" not in request.files:
         return jsonify({"error": "No audio file uploaded"}), 400
 
@@ -178,9 +192,12 @@ def process_audio():
                 pass
 
 
-@app.route("/api/chat", methods=["POST"])
+@app.route("/api/chat", methods=["POST", "OPTIONS"])
+@app.route("/chat", methods=["POST", "OPTIONS"])
 def text_chat():
     """Endpoint for text-based queries with JSON Knowledge Base detection and system actions."""
+    if request.method == "OPTIONS":
+        return "", 200
     data = request.json or {}
     user_text = data.get("message", "").strip()
     voice_gender = data.get("voice_gender", "woman").lower()
@@ -206,9 +223,12 @@ def text_chat():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/wake-deva", methods=["POST"])
+@app.route("/api/wake-deva", methods=["POST", "OPTIONS"])
+@app.route("/wake-deva", methods=["POST", "OPTIONS"])
 def wake_deva():
     """Endpoint triggered when user says 'open deva' or starts up."""
+    if request.method == "OPTIONS":
+        return "", 200
     greeting, is_kb, action = assistant.get_response_info("open deva")
     return jsonify({
         "user_text": "open deva",
@@ -219,16 +239,42 @@ def wake_deva():
     })
 
 
-@app.route("/api/reset", methods=["POST"])
+@app.route("/api/reset", methods=["POST", "OPTIONS"])
+@app.route("/reset", methods=["POST", "OPTIONS"])
 def reset_memory():
     """Resets conversation context history."""
+    if request.method == "OPTIONS":
+        return "", 200
     assistant.reset_conversation()
     return jsonify({"message": "Conversation memory reset successfully", "status": "success"})
 
 
-@app.route("/<path:path>", methods=["GET"])
+@app.route("/<path:path>", methods=["GET", "POST", "OPTIONS"])
 def catch_all(path):
-    """Fallback handler to ensure static assets or SPA views never 404."""
+    """Fallback handler to ensure dynamic routes, POST dispatches, or SPA views never 405/404."""
+    if request.method == "OPTIONS":
+        return "", 200
+
+    if request.method == "POST":
+        clean = path.strip("/").split("/")[-1].lower()
+        if clean in ["chat", "api/chat"]:
+            return text_chat()
+        elif clean in ["process-audio", "api/process-audio"]:
+            return process_audio()
+        elif clean in ["wake-deva", "api/wake-deva"]:
+            return wake_deva()
+        elif clean in ["reset", "api/reset"]:
+            return reset_memory()
+        elif clean in ["knowledge", "api/knowledge"]:
+            return handle_knowledge()
+        # If payload has audio or message, dispatch intelligently
+        if "audio" in request.files:
+            return process_audio()
+        if request.is_json and "message" in (request.json or {}):
+            return text_chat()
+        return jsonify({"error": f"Endpoint /{path} not found"}), 404
+
+    # GET request: serve static file if it exists, otherwise index.html
     file_path = os.path.join(STATIC_DIR, path)
     if os.path.exists(file_path) and os.path.isfile(file_path):
         return send_from_directory(STATIC_DIR, path)
